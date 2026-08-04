@@ -42,12 +42,17 @@
 
 质量判断：
 1. 恒定波形判断：
-   当振动或电流的峰峰值接近0时标记constant_signal，工况序列在单个50 ms窗口内保持稳定不直接视为异常。
+   当振动或电流的峰峰值接近0时标记CONSTANT_SIGNAL，工况序列在单个50 ms窗口内保持稳定不直接视为异常。
 2. 接近零波形判断：
-   当振动或电流去除直流后的RMS接近0时标记near_zero_signal，转速、转矩或径向载荷接近0时只表示对应工况。
+   当振动或电流去除直流后的RMS接近0时标记NEAR_ZERO_SIGNAL，转速、转矩或径向载荷接近0时只表示对应工况。
 3. 疑似削顶判断：
-   当连续多个采样点等于传感器最大值或最小值时标记possible_clipping，说明当前通道可能超出量程或发生削顶。
+   当连续多个采样点等于传感器最大值或最小值时标记POSSIBLE_CLIPPING，说明当前通道可能超出量程或发生削顶。
 4. 质量状态汇总：
    没有质量标志时status为good，存在不影响继续处理的问题时status为warning。
 5. 严重问题处理：
    三路高频信号均接近零、两路电流无法对应时停止对应的模型推理，不伪造正常特征值。
+
+当前阶段说明：
+- 质量标志统一为大写枚举：CONSTANT_SIGNAL、NEAR_ZERO_SIGNAL、POSSIBLE_CLIPPING、DEVICE_NOT_RUNNING。
+- 当前阶段只生成CONSTANT_SIGNAL和DEVICE_NOT_RUNNING；NEAR_ZERO_SIGNAL与POSSIBLE_CLIPPING仅保留枚举，不生成（见《降采样和感知实现流程.md》）。
+- 设备未运行时（当前包平均转速低于running_speed_threshold_rpm）产生DEVICE_NOT_RUNNING，不执行恒定判断，仍尝试计算特征；振动功率不足以稳定计算特征时返回PERCEPTION_FAILED。

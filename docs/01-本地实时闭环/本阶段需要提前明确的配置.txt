@@ -1,35 +1,266 @@
-以下内容不应散落在各模块代码中：
+## 一、目前必须先拍板的关键事项
 
-- 当前边缘节点编号；
-- 任务等待数据的超时时间；
-- 单包最大字节数；
-- 各通道预期采样率和采样点数；
-- 各通道允许数值范围；
-- 环形缓存容量或保留时长；
-- 降采样目标采样率；
-- 抗混叠滤波参数；
-- 模型路径和模型版本；
+### 1. 超时策略存在文档冲突
+
+### 2. 传感器量程参数尚未给出
+
+### 3. 本地模型和代码替代规则尚需明确
+
+需要确定：
+
+- 本地模型文件路径；
+- 模型版本；
+- 模型运行时及输入输出格式；
+- 使用哪些 `PerceptionResult` 字段作为模型输入；
 - 模型推理超时时间；
-- 合法的诊断类别、风险等级和置信度范围。
+- 模型输出类别、风险等级和置信度范围；
+- 代码替代规则及规则版本；
+- 代码规则使用的阈值和规则分数算法。
 
-当前调度任务接口没有携带执行截止时间。第一阶段实现前需要二选一：
+启动后必须至少有一条可用路线：优先本地模型，模型不存在、加载失败、推理异常或输出非法时，降级到代码替代路线。
 
-1. 在任务接口中增加 `execution_deadline_ns`；或
-2. 使用边缘本地统一配置的等待超时和执行超时。
+---
 
-在接口未最终确定前，不应同时实现两套含义不同的超时规则。
+## 二、任务与节点配置
 
-外部接口对象：
+需要统一配置或固定：
 
-内部数据对象：
-RawSensorPacket -原始数据包
-ValidatedRawPacket -经过严格校验后的数据包
-DownsampledPacket -经过降采样后的数据包
-PerceptionResult -已经完成质量判断和特征提取
-EdgeResult -边缘模型结果
-枚举-统一的只能使用固定值的字段
-ACCEPTED/REJECTED -任务确认状态
-SUCCEEDED/FAILED/TIMEOUT -任务执行状态
-good/warning/invalid -数据质量状态
-low/medium/high/not_assessed -风险等级
-统一错误码
+| 配置 | 当前文档要求 |
+|---|---|
+| 当前边缘节点编号 `edge_node_id` | edge_node_01 |
+| 每任务发送器数量 | 固定为1个 |
+| 每任务数据包数量 | 固定80包 |
+| `sequence_number` | 固定1～80 |
+| 数据包发送周期 | 50 ms |
+| 每发送器接收速率 | 固定20包/秒 |
+| 结束标志 | 收到 `sequence_number=80` |
+| 第80包 | 必须可靠到达 |
+| 普通缺失包 | 不补发 |
+| 数据顺序 | 同一发送器严格递增、不乱序 |
+| 单包失败策略 | 只影响当前包，不终止整个任务 |
+| 任务确认策略 | 当前流程固定返回 `ACCEPTED` |
+
+还应确定任务注册表、待匹配数据区和单包请求体的容量上限，包括：
+
+- 单包最大字节数；
+- 数组最大长度；
+- 同时运行任务数；
+- 待匹配任务/数据包最大数量；
+- 重复任务和冲突数据的保留策略。
+
+## 三、原始数据校验配置
+
+当前数据规格已经基本固定：
+
+| 通道 | 采样率 | 点数 | 单位 |
+|---|---:|---:|---|
+| `vibration` | 64000 Hz | 3200 | `mm/s` |
+| `phase_current_1_A` | 64000 Hz | 3200 | `A` |
+| `phase_current_2_A` | 64000 Hz | 3200 | `A` |
+| `shaft_speed_rpm` | 4000 Hz | 200 | 当前不校验单位 |
+| `load_torque_nm` | 4000 Hz | 200 | 当前不校验单位 |
+| `bearing_radial_load_n` | 4000 Hz | 200 | 当前不校验单位 |
+| `bearing_module_temperature_c` | 单值 | 1 | 当前不校验单位 |
+
+共同约束：
+
+- 每包覆盖50 ms；
+- 所有序列必须覆盖相同窗口；
+- 数值必须为有限数；
+- 时间统一使用 Unix 纳秒；
+- 硬性允许范围本阶段未取得：已配置范围的通道才执行`VALUE_OUT_OF_RANGE`校验，未配置时跳过且不编造范围值；
+- 是否继续对后三路工况量和温度忽略 `unit` 字段，需要最终确认。
+
+## 四、缓存和上下文配置
+
+| 配置项 | 当前要求 |
+|---|---|
+| `raw_cache_retention_seconds` | 不小于60秒 |
+| `max_receive_rate_per_sender` | 20包/秒 |
+| `context_queue_capacity_per_sender` | 不小于1200，并预留余量 |
+| `raw_cache_capacity_per_sender` | 不小于1200个完整包，并预留余量 |
+| `context_before_packet_count` | 固定20 |
+| `cache_cleanup_interval_seconds` | 大于0，建议1秒 |
+| 缓存分区维度 | `sender_id` |
+| 并发锁粒度 | 每个 `sender_id` 一把互斥锁 |
+| `raw_packet_ref` | `(sender_id, task_id, sequence_number)` |
+
+容量下限按以下公式计算：
+
+```text
+最大接收速率 × 保留时间
+= 20包/秒 × 60秒
+= 1200包
+```
+
+还需要结合实际内存明确“预留余量”的具体比例或最终容量。
+
+## 五、降采样配置
+
+目前流程中已有明确设计值，应作为一组不可分割的统一配置固化：
+
+| 参数 | 当前值 |
+|---|---:|
+| 输入/输出采样率 | 64000 / 16000 Hz |
+| 输入/输出点数 | 3200 / 800 |
+| 抽取倍数 | 4 |
+| FIR类型 | 线性相位 Kaiser 窗低通 FIR |
+| 系数数量 | 369 |
+| Kaiser `beta` | 8.41 |
+| 通带截止频率 | 7000 Hz |
+| 阻带起始频率 | 8000 Hz |
+| 设计截止频率 | 7500 Hz |
+| 阻带设计目标/验收下限 | 85 / 80 dB |
+| 通带波动目标/验收上限 | 0.05 / 0.1 dB |
+| 直流增益 | 1 |
+| 边界处理 | 镜像反射，不重复边界点 |
+| 抽取相位 | `y[m] = z[4m]` |
+| 群延迟补偿 | 184个输入采样点 |
+
+除上述参数外，还必须固化完整的369个 FIR 系数，不能在不同模块中分别生成。
+
+## 六、感知和质量判断配置
+
+频域处理已经固定：
+
+- 周期型 Hann 窗；
+- `NFFT=800`；
+- 单边功率谱密度；
+- 不进行零填充；
+- 频率间隔20 Hz；
+- DC、Nyquist 不乘2，其余正频率点乘2。
+
+每个高频通道直接配置恒定判断：
+
+```text
+constant_detection_enabled
+constant_threshold
+constant_threshold_source
+constant_threshold_version
+```
+
+无法得到可信阈值时，对应通道不得启用恒定判断，也不得静默使用零值或临时默认值。`constant_threshold`不再由通道量程或传感器分辨率公式推导。
+
+独立数值稳定阈值：
+
+```text
+feature_zero_rms_threshold
+feature_zero_power_threshold = feature_zero_rms_threshold²
+current_relationship_zero_rms_threshold
+```
+
+所有数值稳定阈值不依赖硬量程或停机噪声RMS，必须作为显式配置固化，不得从`near_zero_rms_threshold`或通道量程派生。
+
+设备运行状态判断：
+
+```text
+当前包平均转速 >= running_speed_threshold_rpm
+→ 设备处于运行状态
+
+当前包平均转速 < running_speed_threshold_rpm
+→ 设备不处于确认运行状态
+→ 产生 DEVICE_NOT_RUNNING 设备级质量标志
+```
+
+`running_speed_threshold_rpm`为直接配置值，不根据设备额定转速计算。配置必须包含：
+
+```text
+- running_speed_threshold_rpm
+- running_speed_threshold_source
+- running_speed_threshold_version
+```
+
+`NEAR_ZERO_SIGNAL`和`POSSIBLE_CLIPPING`当前阶段禁用：本阶段未取得停机噪声基线和权威量程边界，不生成这两类标志，只保留枚举。因此不再需要停机噪声RMS、设备额定转速等业务参数，也不再需要`near_zero_rms_threshold`和`clipping_tolerance`。
+
+质量标志统一为大写枚举：
+
+```text
+CONSTANT_SIGNAL
+NEAR_ZERO_SIGNAL
+POSSIBLE_CLIPPING
+DEVICE_NOT_RUNNING
+```
+
+其中`NEAR_ZERO_SIGNAL`和`POSSIBLE_CLIPPING`当前只保留枚举，不生成。
+
+## 七、公共契约和固定枚举
+
+实现前需要冻结以下对象的字段、类型和可空规则：
+
+- `TaskDispatch`
+- `TaskAck`
+- `RawSensorPacket`
+- `ValidatedRawPacket`
+- `DownsampledPacket`
+- `PerceptionResult`
+- `EdgeResult`
+- `TaskExecutionResult`
+- `TaskRecord`
+- `PacketRecord`
+- `ContextSlot`
+- `ModuleStatus`
+- `PerceptionInvocationContext`（新增：`edge_node_id`、`perception_received_at_ns`）
+
+同时统一固定：
+
+- 任务状态；
+- 数据包状态；
+- 当前处理阶段；
+- 缓存状态；
+- 数据质量状态；
+- 内部运行记录使用的`execution_mode`；
+- 诊断类别；
+- 风险等级；
+- 错误码；
+- 质量标志；
+- 时间戳含义和生成时机。
+
+`EdgeResult`以《边缘部分需要的接口.md》已经协商的任务输出为准，固定为扁平4字段：
+
+```text
+edge_result
+confidence
+edge_risk_level
+model_version
+```
+
+不得把`diagnosis`、`execution`嵌套对象或`confidence_type`、`execution_mode`、`runtime_version`等新增字段直接加入外部`EdgeResult`。这些信息只保存在内部模型运行记录和日志中。
+
+内部运行记录至少包括：
+
+```text
+execution_mode = LOCAL_MODEL | CODE_FALLBACK
+runtime_version
+model_id
+model_version
+rule_version
+prompt_version
+inference_latency_ms
+fallback_reason
+```
+
+其中`runtime_version`只表示模型运行器代码版本。代码替代路线的外部`model_version`使用带`edge_rule_`前缀的实际规则版本，`confidence`只能解释为规则分数；当前DeepSeek路线的`confidence`为`0～1`范围内的未经校准诊断分数，不能描述为真实正确概率。
+
+## 八、启动时必须执行的配置检查
+
+任一必要配置缺失或冲突时，应停止当前处理流程，不能静默使用临时默认值。启动检查至少包括：
+
+- 节点编号和支持的任务类型完整；
+- 通道采样率、点数、单位配置完整；
+- 运行状态阈值`running_speed_threshold_rpm`为有限非负数，来源和版本完整；
+- 启用恒定判断（`constant_detection_enabled = true`）的高频通道均已配置合法`constant_threshold`，来源和版本完整；
+- 数值稳定阈值`feature_zero_rms_threshold`、`feature_zero_power_threshold`、`current_relationship_zero_rms_threshold`完整且满足平方关系；
+- 配置了硬性允许范围的通道其范围合法；本阶段未取得硬量程时允许缺少范围配置并跳过`VALUE_OUT_OF_RANGE`校验，但在启动日志中记录该能力缺失；
+- `NEAR_ZERO_SIGNAL`和`POSSIBLE_CLIPPING`当前处于禁用状态；
+- 缓存保留时间和容量满足最低要求；
+- 上下文前置包数固定为20；
+- FIR系数数量、对称性、直流增益和频率响应合格；
+- Hann窗、NFFT、PSD规则和20 Hz频率间隔一致；
+- 模型路径、版本和输入输出契约有效；
+- 本地模型或代码替代路线至少有一条可用；
+- 所有时间字段使用同一个 Unix 纳秒时钟；
+- 超时策略只有一套明确语义。
+
+综合来看，当前最需要外部确认的三项是：**超时策略、模型与代码规则、接口及枚举契约**。采样、缓存、降采样和频域参数已经可以按文档直接固化；传感器量程、停机噪声和额定转速在本阶段不作为必需参数（未配置硬量程时跳过`VALUE_OUT_OF_RANGE`校验）。
+
+参考文档：[第一阶段实现流程.md](</D:/Projects/edge/docs/01-本地实时闭环/第一阶段实现流程.md>)、[任务接入和数据匹配实现流程.md](</D:/Projects/edge/docs/01-本地实时闭环/任务接入和数据匹配实现流程.md>)、[校验和环形缓存实现流程.md](</D:/Projects/edge/docs/01-本地实时闭环/校验和环形缓存实现流程.md>)、[降采样和感知实现流程.md](</D:/Projects/edge/docs/01-本地实时闭环/降采样和感知实现流程.md>)、[边缘模型运行实现流程.md](</D:/Projects/edge/docs/01-本地实时闭环/边缘模型运行实现流程.md>)。
