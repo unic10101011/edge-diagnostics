@@ -1,0 +1,54 @@
+# 闭环验证配置（窗口聚合＋有界队列＋超时＋降级）
+# 所有参数均为【待压测后冻结】，不是最终生产值。验证完成后再统一写入执行计划文档。
+
+window:
+  length_seconds: 1.0            # TEST: 窗口长度
+  expected_samples: 20           # 每发送方 20 包/秒
+  min_samples_for_full: 15       # TEST: 稀疏判定阈值（sample_count < 此值 → WINDOW_SPARSE）
+  late_tolerance_seconds: 0.25   # TEST: 迟到容忍（窗口边界归属，当前实现：关闭窗口后到达直接丢弃并计数）
+  submit_sparse_window: true     # 稀疏窗口仍提交模型/规则，仅标记质量
+  on_empty_window: record_only   # 空窗口不调模型，仅记录
+
+queue:
+  capacity: 1                    # TEST: 1（1条推理 + 最多1条等待）或 2
+  worker_count: 1
+  # drop_current_to_fallback | replace_oldest_pending
+  full_policy: drop_current_to_fallback
+
+timeout:
+  queue_wait_ms: 250             # TEST: 200~300
+  inference_ms: 1500             # TEST: 模型推理超时
+  total_ms: 2000                 # TEST: 窗口提交到出结果的总处理超时
+  # 推理已完成但总时长超限时：deliver_late_model_result（返回模型结果并标记迟到）
+  # | fallback（丢弃模型结果，改走规则）
+  on_total_timeout_after_completion: deliver_late_model_result
+
+breaker:
+  enabled: true
+  consecutive_failure_threshold: 5   # TEST: 连续失败熔断
+  recovery_probe_interval_s: 60.0    # TEST: 熔断恢复探测周期
+  probe_inference_timeout_ms: 2000
+
+fallback:
+  rule_version: edge_rule_v1.0
+
+model:
+  # T2/T4 真实模型场景（WSL）用；--adapter mock 时忽略
+  path: /home/unic/models/Qwen2.5-1.5B-Instruct
+  dtype: bfloat16
+  device: auto
+  max_new_tokens: 64
+
+scenarios:
+  t2_stability:
+    sender_count: 1
+    perception_rate_hz: 20
+    duration_seconds: 1800       # 至少 30 分钟
+  t4_two_senders:
+    sender_count: 2
+    perception_rate_hz: 20
+    duration_seconds: 600        # 双发送方过载，建议 10 分钟
+
+output:
+  results_dir: var/closed_loop/results
+  logs_dir: var/closed_loop/logs

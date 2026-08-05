@@ -1,0 +1,63 @@
+# Qwen2.5-1.5B-Instruct 压测配置（与 DeepSeek 同口径 A/B）
+# 当前阶段只开 warmup + single_baseline（并发/固定速率等 Qwen 单请求结果合格后再启用）。
+
+model:
+  path: /home/unic/models/Qwen2.5-1.5B-Instruct
+  dtype: bfloat16
+  device: auto
+  low_cpu_mem_usage: true
+
+generation:
+  do_sample: false           # 贪心解码，稳定可复现
+  temperature: 0
+  max_new_tokens: 64         # 目标：非推理模型应在 64 token 内输出完整 3 字段 JSON
+
+input:
+  template_version: bearing-perception-result/1.0
+  inputs_jsonl: var/benchmark/inputs.jsonl
+  per_category: 20
+  seed: 42
+
+scenarios:
+  warmup:
+    enabled: true
+    concurrency: 1
+    requests: 10
+  single_baseline:
+    enabled: true
+    concurrency: 1
+    requests: 100
+  stability:
+    enabled: false   # 单独用 --scenario stability 运行（并发1，5分钟）
+    concurrency: 1
+    duration_seconds: 300
+  low_concurrency:
+    enabled: false
+    concurrency: 2
+    duration_seconds: 60
+  medium_concurrency:
+    enabled: false
+    concurrency: 4
+    duration_seconds: 60
+  high_concurrency:
+    enabled: false
+    concurrency: 8
+    duration_seconds: 60
+  fixed_rate:
+    enabled: false
+    concurrency: 1
+    # 精简固定速率：只测接近饱和点，5/10/20 req/s 在 μ≈1.44 下必然积压，暂不测
+    steps:
+      - {rate: 0.5, duration_seconds: 120}
+      - {rate: 1.0, duration_seconds: 120}
+      - {rate: 1.25, duration_seconds: 120}
+      - {rate: 1.5, duration_seconds: 120}
+      - {rate: 2.0, duration_seconds: 60}
+
+request:
+  timeout_seconds: 30
+  serialize_inference: true
+
+output:
+  results_dir: var/benchmark/results
+  logs_dir: var/benchmark/logs

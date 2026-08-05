@@ -1,0 +1,62 @@
+# DeepSeek 边缘模型单体压测配置（第一阶段）
+# 运行环境：WSL。模型只加载一次，压测时不要改动本文件中的固定生成参数。
+
+model:
+  # WSL 内模型绝对路径
+  path: /home/unic/models/DeepSeek-R1-Distill-Qwen-1.5B
+  dtype: bfloat16            # RTX 5060 8GiB，BF16 下 1.5B 约 3.2GB
+  device: auto               # cuda / auto / cpu
+  low_cpu_mem_usage: true
+
+generation:
+  do_sample: false           # 固定贪心解码，保证可复现
+  temperature: 0
+  # 实测：DeepSeek-R1-Distill-Qwen-1.5B 会先输出 ~300+ token 的中文推理再给 JSON，
+  # 64 token 必截断、合法率 0%。调到 512 让推理+JSON 完整生成。
+  max_new_tokens: 512
+  # pad_token_id 留空则使用 tokenizer.pad_token_id 或 eos_token_id
+
+input:
+  # 模拟输入模板版本，会记录进压测结果
+  template_version: bearing-perception-result/1.0
+  # 输入文件（JSONL）。不存在时压测程序会自动调用 generate_test_inputs.py 生成
+  inputs_jsonl: var/benchmark/inputs.jsonl
+  per_category: 20           # 每类（正常/风险/边界异常）生成的条数
+  seed: 42
+
+scenarios:
+  warmup:
+    enabled: true
+    concurrency: 1
+    requests: 10             # 排除首次编译与缓存影响
+  single_baseline:
+    enabled: true
+    concurrency: 1
+    requests: 100            # 原始延迟基线
+  low_concurrency:
+    enabled: true
+    concurrency: 2
+    duration_seconds: 60
+  medium_concurrency:
+    enabled: true
+    concurrency: 4
+    duration_seconds: 60
+  high_concurrency:
+    enabled: true
+    concurrency: 8
+    duration_seconds: 60
+  fixed_rate:
+    enabled: true
+    duration_seconds: 10     # 每档速率持续时间（第一版可缩短）
+    concurrency_list: [1, 2, 4]
+    rates_per_second: [5, 10, 20, 25, 40]
+
+request:
+  timeout_seconds: 30
+  # 原生 Transformers 并发调用同一模型并不安全，先加锁串行化建立基线；
+  # 之后用完全相同的输入和指标对比 vLLM 时，再把此值设为 false 以启用真实批处理。
+  serialize_inference: true
+
+output:
+  results_dir: var/benchmark/results
+  logs_dir: var/benchmark/logs

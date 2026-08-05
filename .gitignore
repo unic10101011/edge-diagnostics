@@ -1,0 +1,8 @@
+# 压测产物（结果与日志）
+var/benchmark/
+var/closed_loop/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv*/
